@@ -7840,6 +7840,55 @@ class GatewayOrchestrator:
                         "loop": loop_payload,
                     },
                 )
+                # Best-effort per-member event log: a member's DM-slot patrol
+                # started or stopped. Additive; never affects the broadcast.
+                # emit fsyncs, so offload it: this observer runs on the gateway
+                # loop and a synchronous durability barrier would stall every
+                # concurrent session. Fire-and-forget on the loop's executor.
+                try:
+
+                    from kiro_crew import eventlog_hooks
+                    from kiro_crew.eventlog.types import PATROL_STARTED, PATROL_STOPPED
+
+                    _pslug = eventlog_hooks.member_slug_for_slot(loop.slot_key)
+                    _etype2: str | None = None
+                    _edata: dict = {}
+                    if event == "added":
+                        _etype2, _edata = PATROL_STARTED, {"slot_key": loop.slot_key}
+                    elif event in ("removed", "expired"):
+                        _reason = getattr(loop, "stopped_reason", None) or event
+                        _etype2, _edata = (
+                            PATROL_STOPPED,
+                            {"slot_key": loop.slot_key, "reason": _reason},
+                        )
+                    if _pslug is not None and _etype2 is not None:
+                        _pslug_s: str = _pslug
+                        _etype_s: str = _etype2
+
+                        def _emit_patrol(
+                            slug: str = _pslug_s, etype: str = _etype_s, data: dict = _edata
+                        ) -> None:
+                            try:
+                                eventlog_hooks.emit(slug, None, etype, data)
+                            except Exception:
+                                logger.debug("patrol event-log emit failed", exc_info=True)
+
+                        # Queued on the ordered executor whether or not this is
+                        # the serving thread: one queue is what orders a rapid
+                        # start/stop, and an inline write from a non-loop caller
+                        # could land ahead of an append already queued.
+                        #
+                        # The return is deliberately not read: this path keeps no
+                        # record that the event was written, so a refused or failed
+                        # append costs it that event and nothing more. The patrol's
+                        # own state lives in its loop, not in this log, and the
+                        # drain at both exit paths covers an ordinary shutdown. A
+                        # caller that DID keep such a record would have to read the
+                        # answer -- see the slot path in dashboard state, which
+                        # keeps a checkpoint and does.
+                        eventlog_hooks.submit(_emit_patrol)
+                except Exception:
+                    logger.debug("patrol event-log hook failed", exc_info=True)
 
         self.autonudge_svc = AutoNudgeService(
             base_dir=data_home(),
@@ -13439,6 +13488,36 @@ class GatewayOrchestrator:
         # process takes over.
         await self._init_autonudge()
 
+        # Per-member event-log startup reconcile. Runs AFTER AutoNudge is
+        # constructed (it consults live loops to decide patrol closers) and
+        # after slot restoration: member slots are rehydrated lazily on demand
+        # rather than eagerly at boot, so ``state._slots`` here holds whatever
+        # the dashboard restored, and any driving.open slot not present is
+        # closed as interrupted. Off-loop (ensure/append are synchronous file
+        # IO) and best-effort — the helper swallows its own failures so a
+        # logging fault never blocks boot.
+        if self.dashboard_state is not None:
+            from kiro_crew import eventlog_hooks
+
+            async def _reconcile_members() -> None:
+                # Off-loop (ensure/append are synchronous file IO, and first-boot
+                # migration fsyncs per record) and best-effort. Run as a background
+                # task rather than an awaited boot step: it must not delay Slack
+                # availability or socket connect, and it is idempotent on reboot.
+                try:
+                    await asyncio.to_thread(
+                        eventlog_hooks.reconcile_members_at_startup,
+                        self._cfg,
+                        self.dashboard_state,
+                        self.autonudge_svc,
+                    )
+                except Exception:
+                    logger.debug("member event-log startup reconcile failed", exc_info=True)
+
+            # Retain a strong reference: a bare create_task is only weakly held,
+            # so the loop could garbage-collect it mid-run.
+            self._member_reconcile_task = asyncio.create_task(_reconcile_members())
+
         # Wire up event routing and interactive handlers
         init_interactions(self)
         # Awaited ON the loop, never offloaded whole: WSSocketModeClient's
@@ -13614,6 +13693,17 @@ class GatewayOrchestrator:
                 # for extra work before its os._exit is a handler that may not
                 # get there.
                 cleanup_orphaned_sessions(narrow_with_leaders=False)
+                # Same reason as the log queue below: os._exit skips atexit, so the
+                # member event log's own drain hook never runs. Synchronous because
+                # a signal handler cannot await, and bounded inside the module for
+                # the same reason the log-queue drain is bounded here -- a wedged
+                # disk must delay this exit, never hold it.
+                try:
+                    from kiro_crew import eventlog_hooks
+
+                    eventlog_hooks.drain_for_shutdown()
+                except Exception:
+                    pass  # force exit must never be blocked by bookkeeping
                 # os._exit skips atexit, so the log queue's drain hook never
                 # runs — flush the queued gateway.log tail here, bounded so a
                 # wedged disk cannot hang the force exit.
@@ -13747,6 +13837,20 @@ class GatewayOrchestrator:
                 logger.warning("the session's log did not fully drain before exit")
         except Exception:  # noqa: BLE001 - shutdown must not raise
             logger.debug("the session's log drain failed during shutdown", exc_info=True)
+        # The member event log's queued appends, for the same reason and on the same
+        # terms. Its appends are ORDERED on one executor, so the tail sitting there
+        # at exit is the newest transitions -- a patrol stop, a slot close -- and
+        # they are exactly what a reader looks for after a restart. It registers an
+        # atexit hook of its own, which os._exit skips, so this is the only drain
+        # that runs on this path. Bounded inside the module and off-loop, like the
+        # drain above; calling it twice is a no-op.
+        try:
+            from kiro_crew import eventlog_hooks
+
+            if not await asyncio.to_thread(eventlog_hooks.drain_for_shutdown):
+                logger.warning("the member event log did not fully drain before exit")
+        except Exception:  # noqa: BLE001 - shutdown must not raise
+            logger.debug("the member event log drain failed during shutdown", exc_info=True)
         # This is a hard exit too: os._exit skips atexit, so the log queue's
         # drain hook never runs here either. Without this the whole shutdown
         # tail is lost -- including the "Graceful shutdown timed out" warning

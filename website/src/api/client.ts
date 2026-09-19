@@ -1,5 +1,6 @@
 import { installSessionExpiryHandler } from './sessionExpirySignal'
 import { resizeImageForModel, type ResizeInfo } from '../utils/resizeImage'
+import type { ProjectionsBlock } from '../state/memberProjectionTypes'
 import type {
   AppContributor,
   ChatSlot,
@@ -2505,6 +2506,10 @@ export interface MemberRosterRow {
   source?: 'kirocrew' | 'builtin' | 'package' | string
   /** User's favourite mark; toggled via PUT /api/agents/{name}. */
   starred?: boolean
+  /** Baseline projections (roster/activity/wake/driving) at a known seq, fed
+   *  to the per-member projection store so the page renders from pushed
+   *  frames. Absent on an older gateway that predates the event log. */
+  projections?: ProjectionsBlock
   [extra: string]: unknown
 }
 
