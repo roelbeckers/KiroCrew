@@ -8496,6 +8496,29 @@ async def _run_chat(
     # tool_call_id -> DISPLAY TITLE (LLM-authored prose for shell tools; used
     # only for PostToolUse hook name-matching — NOT trustworthy for security).
     _pending_tools: dict[str, str] = {}
+    # The `ts` of every row ALREADY in this slot when the turn began, so a row
+    # this turn appended can be told from one that predates it.
+    #
+    # It exists because `tool_call_id` alone cannot say which rows belong to the
+    # call in front of us: it is the BACKEND's id and session-local, so a reset
+    # that recreates the session WITHOUT clearing `slot.messages` -- a project
+    # change does exactly that -- leaves a historical row holding an id a later
+    # call can be issued again. Scanning `slot.messages` by id then returns that
+    # old row beside the new one, and an app flag written from such a scan lands
+    # on a row that never had an app. Durably, too: the flag is deliberately
+    # never written False, so nothing later clears it, and the notice would draw
+    # on the older row while the row that really has the app is passed over.
+    #
+    # A SET of the pre-existing values, compared by membership, rather than a
+    # high-water mark compared by order: `ts` is a string, so an ordering test
+    # would need it to sort numerically, and membership needs nothing of the
+    # format at all. Snapshotted once per turn here, before any tool row of this
+    # turn exists, which is what makes absence from it mean "appended since".
+    #
+    # Rows of THIS turn are kept whatever their id, so one call owning two rows
+    # still works: an auto-approved tool appends a pre- and a post-approval row
+    # under one id, both within this turn, and both keep their flag.
+    _rows_before_turn: frozenset[str] = frozenset(str(_m.get("ts") or "") for _m in slot.messages)
     # tool_call_id -> canonical directive-tool name (forgery gate). Written
     # ONLY at EVENT_TOOL_CALL, ONLY from the out-of-band _meta.kiro identity
     # (event.tool_name + event.mcp_server_name), never from the title. This is
@@ -11134,7 +11157,44 @@ async def _run_chat(
                 # the marker from the transcript text (cosmetic, like redaction).
                 # Awaited: the spool read inside is thread-offloaded (multi-MB
                 # records must not stall this event loop).
-                _out = await mcp_apps_render.handle_tool_result(
+                # Rows this call already owns, by their own `ts`. Resolved HERE,
+                # synchronously, so the claim below can be attributed to a row
+                # identity rather than to the backend's `tool_call_id`: a `ts`
+                # is minted per row, where a session reset can reissue a
+                # `tool_call_id` an older row already used. A `ts` is not an
+                # identity: an explicit one is preserved verbatim for a replayed
+                # channel row, and a coarse clock stamps two rows appended in one
+                # tick alike, which is the reason `meta.mid` is minted at all. Reading `slot.messages` adds no
+                # await, so the claim stays adjacent to the checks above it.
+                #
+                # Restricted to rows THIS TURN appended. Matching on the id
+                # alone would also return a historical row a transcript-
+                # preserving reset left holding the same id, which would put
+                # that old row's `ts` into the claim and let the old row answer
+                # for this call's app.
+                _owned_rows: list[dict] = (
+                    [
+                        m
+                        for m in slot.messages
+                        if m.get("role") == "tool"
+                        and m.get("meta", {}).get("tool_call_id") == _tcid
+                        and str(m.get("ts") or "") not in _rows_before_turn
+                    ]
+                    if _tcid
+                    else []
+                )
+                # Both identities are derived from ONE row list so they cannot
+                # drift apart. `meta.mid` is what the claim is ATTRIBUTED by: it is
+                # minted per row, so it separates two rows a coarse clock stamped
+                # in the same tick, and a row replayed from a channel transcript
+                # whose own `ts` was kept verbatim. The `ts` rides along as the
+                # fallback identity for a claim body carrying no ids, and is
+                # compared as a set rather than for order.
+                _owned_row_ts: list[str] = [str(m.get("ts") or "") for m in _owned_rows]
+                _owned_row_ids: list[str] = [
+                    str(m.get("meta", {}).get("mid") or "") for m in _owned_rows
+                ]
+                _render = await mcp_apps_render.handle_tool_result(
                     state,
                     slot_key=slot.key,
                     tool_call_id=_tcid,
@@ -11144,7 +11204,29 @@ async def _run_chat(
                     # the binding check or every real render is refused as a
                     # bare-vs-prefixed mismatch (silent no-render).
                     producing_session_key=effective_session_key(slot),
+                    row_ts=_owned_row_ts,
+                    row_ids=_owned_row_ids,
                 )
+                _out = _render.text
+                # Rows this frame flags, by their own `ts`. That is enough HERE,
+                # because the flag write is in-memory against the very rows just
+                # selected. It is not enough to identify a row LATER: append
+                # keeps an explicit `ts` verbatim for a row replayed from a
+                # channel, and a coarse clock stamps two appends in one tick
+                # alike, which is the collision `meta.mid` is minted to answer --
+                # so the claim records the mids and is attributed by them. A
+                # tool_call_id identifies even less: an auto-approved call has a
+                # pre- and a post-approval row sharing the id, and the client's
+                # patch reducer takes only the newest of those.
+                _app_flag_rows: list[str] = []
+                # The render payload is LIVE-ONLY by design (owner-scoped WS, a
+                # callback capability, and a record that expires), so a reload
+                # has nothing to rebuild the frame from. Remember that this row
+                # HAD an app and persist it below, so a reader is told the app
+                # exists instead of seeing nothing at all. True as well when the
+                # claim was already spent, which is how a row recovers after a
+                # gateway death between the claim and this flag reaching disk.
+                _app_on_row = _render.app_on_row
                 # Session directive: a stateless session-bound tool
                 # (monitor_start / monitor_update / autonudge_stop / set_project
                 # / suggest_followup / ask_question) returns a directive marker
@@ -11553,6 +11635,62 @@ async def _run_chat(
                         ):
                             _meta = m.setdefault("meta", {})
                             _meta["done"] = True
+                            # Written only when this row HAD an app record, and
+                            # never written False: absent means "no app", which
+                            # is also what every row predating this field says.
+                            # The frontend renders its there-is-an-app-here
+                            # notice from this alone, so a flag on a row that
+                            # never had an app would point at nothing.
+                            # `_app_on_row` is THIS frame's: it is assigned
+                            # unconditionally at the top of this same
+                            # EVENT_TOOL_RESULT branch, which is what keeps one
+                            # tool call's app off another call's row.
+                            #
+                            # Gated on the row being one THIS TURN appended, for
+                            # the same reason the claim is: this walk selects by
+                            # `tool_call_id`, and a transcript-preserving reset
+                            # can leave a historical row holding the id the
+                            # backend has just reissued. Without the gate that
+                            # old row is flagged too -- permanently, since the
+                            # flag is never written False below -- and because
+                            # the client draws the notice on the FIRST flagged
+                            # row for the id, the stale row would answer for the
+                            # app while the row that actually has it is passed
+                            # over. `done` and `output` keep the id-wide walk
+                            # they have always had: both describe the CALL, and
+                            # a row replaying that call is not made wrong by
+                            # them, where a claim of "an app was here" is.
+                            if _app_on_row and str(m.get("ts") or "") not in _rows_before_turn:
+                                # ONE update rather than two assignments. The periodic
+                                # flush takes `slot.messages` as a shallow copy of
+                                # REFERENCES and serializes these same live dicts on a
+                                # worker thread, so a snapshot landing between two
+                                # assignments stores `mcp_app` with no `mcp_app_lead`.
+                                # The client draws the notice on the lead alone, so that
+                                # row renders nothing, and the restore pass cannot
+                                # repair it: it reads a surviving `mcp_app` as proof the
+                                # lead survived, marks the claim's lead taken and skips,
+                                # and the claim is swept at its TTL. `dict.update`
+                                # applies both keys in one step, so a reader holding the
+                                # interpreter sees both or neither.
+                                _row_flags: dict[str, Any] = {"mcp_app": True}
+                                # The FIRST row this occurrence flags is its lead,
+                                # and the client draws the notice on that row
+                                # alone. Stamped here because only this loop knows
+                                # which rows belong to THIS call: the client sees
+                                # a flat transcript where a pre-reset row that had
+                                # its own app keeps `mcp_app` forever, so any
+                                # client-side rule that picked the earliest
+                                # flagged row for an id chose that stale row and
+                                # suppressed the notice for the app this turn
+                                # really lost. `slot.messages` is in transcript
+                                # order, so the first row this branch reaches is
+                                # the earliest of the occurrence, and the marker
+                                # needs no ordering comparison to read.
+                                if not _app_flag_rows:
+                                    _row_flags["mcp_app_lead"] = True
+                                _meta.update(_row_flags)
+                                _app_flag_rows.append(str(m.get("ts") or ""))
                             # A terminal frame carrying no renderable output states a
                             # STATUS, not an empty output, so it must not overwrite an
                             # output an earlier frame for this same call already
@@ -11561,6 +11699,47 @@ async def _run_chat(
                             # a first terminal frame with no output still reads as one.
                             if _out or "output" not in _meta:
                                 _meta["output"] = _out
+                    # Tell open clients about the app flag as well as storing it.
+                    # `chat.mcpApps` is a BOUNDED cache, so a session that opens
+                    # many apps evicts the oldest payload while its row is still
+                    # on screen; without this the row goes blank there and only
+                    # names the app after a reload. The reducer MERGES meta, so
+                    # the patch carries that one key and nothing else -- notably
+                    # not the row's output, which is capped at 1 MB and already
+                    # delivered.
+                    #
+                    # One patch per flagged row, addressed by that row's own
+                    # `ts`, because a tool_call_id names TWO rows for an
+                    # auto-approved call and the reducer would patch only the
+                    # newest -- so both rows are correct live, as well as after a
+                    # reload from the persisted write above. A `ts` is the right
+                    # address for THIS send and not a durable identity: it is
+                    # resolved against the transcript the sender is holding, in
+                    # the same turn that wrote these rows. The claim, which is
+                    # read back on a later process, records `meta.mid` instead.
+                    for _i, _flag_ts in enumerate(_app_flag_rows):
+                        if not _flag_ts:
+                            continue
+                        # The lead marker travels with the flag, or an open client
+                        # would hold a flagged row that the stored transcript calls
+                        # the lead and the live view calls neither -- the notice
+                        # would then appear only after a reload.
+                        _patch_meta: dict[str, Any] = {"mcp_app": True}
+                        if _i == 0:
+                            _patch_meta["mcp_app_lead"] = True
+                        try:
+                            state.broadcast_ws(
+                                "chat_message_update",
+                                {
+                                    "slot": slot.key,
+                                    "ts": _flag_ts,
+                                    "meta": _patch_meta,
+                                },
+                            )
+                        except Exception:
+                            # The stored rows are already correct; a client
+                            # reconciles from slot detail on its next fetch.
+                            logger.debug("mcp-app flag broadcast failed", exc_info=True)
                 # Fire PostToolUse hooks
                 _tool_name = _pending_tools.pop(event.tool_call_id, "")
                 try:
