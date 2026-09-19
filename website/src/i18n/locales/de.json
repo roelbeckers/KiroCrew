@@ -15369,6 +15369,8 @@
       "show_controls": "Steuerung anzeigen"
     },
     "membersPage": {
+      "contributed_empty": "Noch nichts anzuzeigen",
+      "contributed_more": "+{{count}} weitere",
       "drawer_delegated_working": "Delegierte Aufgaben laufen",
       "agent_template": "Agent-Vorlage",
       "configuration": "Konfiguration",

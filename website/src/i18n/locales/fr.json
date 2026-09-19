@@ -15565,6 +15565,8 @@
       "show_controls": "Afficher les commandes"
     },
     "membersPage": {
+      "contributed_empty": "Rien à afficher pour le moment",
+      "contributed_more": "+{{count}} de plus",
       "drawer_delegated_working": "Tâches déléguées en cours",
       "agent_template": "Modèle d'agent",
       "configuration": "Configuration",

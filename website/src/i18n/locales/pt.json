@@ -15564,6 +15564,8 @@
       "show_controls": "Mostrar controles"
     },
     "membersPage": {
+      "contributed_empty": "Nada para mostrar ainda",
+      "contributed_more": "mais {{count}}",
       "drawer_delegated_working": "Tarefas delegadas em execução",
       "agent_template": "Modelo de agente",
       "configuration": "Configuração",

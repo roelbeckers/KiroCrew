@@ -313,6 +313,21 @@ class MemberLog:
             return newest_first[:limit]
         return newest_first
 
+    def events_after(self, after: int, limit: int) -> list[Event]:
+        """Oldest-first page of events with ``seq > after``, at most *limit*.
+
+        The catch-up read of the contribution protocol's §3: a consumer that
+        folded up to ``after`` asks for what came next, in the order it must fold
+        it. Distinct from :meth:`history`, which pages BACKWARDS for a timeline
+        view -- folding a newest-first page would apply a later event before an
+        earlier one.
+        """
+        self._ensure_loaded()
+        out = [e for e in self.events if e["seq"] > after]
+        if limit is not None and limit >= 0:
+            return out[:limit]
+        return out
+
     def last_seq(self) -> int:
         """The newest event's seq, or 0 for a log with no events.
 

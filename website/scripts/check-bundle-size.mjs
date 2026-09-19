@@ -76,13 +76,23 @@ export const CHUNK_BUDGETS = {
   // 0.15% headroom. Same recurrence as every note above: the ceiling drifted to
   // under 1% on accumulated catalog copy, so it now fails on the next feature
   // PR's ordinary strings rather than on the new library or surface it exists to
-  // catch. Attribution measured, not assumed: this branch adds 61 catalog lines
-  // x 13 languages for the tasks-capacity panel (49,821 B, 48.7 KB) and no
-  // module -- the chunk still holds the same 13 catalogs plus the entry, and no
-  // lazy import() boundary can move a catalog string out of `all`, which is why
-  // shrinking is not an option here. Back to the 5% convention over the
-  // measurement that includes this branch (11,930,130 B).
-  all: 12240 * KB, // measured 11650.5 KB on fix/gatewayd-overload-liveness 2026-09-16 (5.1% headroom)
+  // catch. Attribution measured, not assumed: the tasks-capacity branch adds 61
+  // catalog lines x 13 languages (49,821 B, 48.7 KB) and no module -- the chunk
+  // still holds the same 13 catalogs plus the entry, and no lazy import()
+  // boundary can move a catalog string out of `all`, which is why shrinking is
+  // not an option here. Back to the 5% convention over the measurement that
+  // includes that branch (11,930,130 B), which main set at 12240 KB.
+  // Re-measured 2026-09-16 on THIS branch, rebased onto that main: the
+  // append-only crew ledger with pluggable contributors adds its member
+  // event-log surface strings (activity feed, contributed cards,
+  // patrol/roster/wake copy) across all 13 catalogs, building the chunk at
+  // 11,993,817 B (11712.7 KB). The ceiling is UNCHANGED at main's 12240 KB,
+  // because that measurement sits 4.3% under it -- comfortably outside this
+  // file's own re-baseline trigger of under 1% headroom. A ceiling raised while
+  // the measurement still fits is a ceiling raised for the next branch rather
+  // than for this one, and it spends the margin that makes the gate mean
+  // anything.
+  all: 12240 * KB, // measured 11712.7 KB on this branch rebased 2026-09-16 (4.3% headroom)
 
   // The i18n RUNTIME — the i18next singleton, `initI18n`, the English catalog —
   // named after `src/i18n/t.ts`. Held separately from `all` above because

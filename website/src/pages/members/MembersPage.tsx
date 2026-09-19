@@ -103,8 +103,9 @@ import { loadColumnWidth } from '../../lib/columnWidth'
 import { tabStatus, type TabStatus } from '../../lib/sessionTabs'
 import { lastActivityEpoch } from '../chat/sessionOrder'
 import { activityDayLabel, floorCountText, groupActivityDays, projectLabel } from './activityDays'
+import { ContributedViews } from './ContributedViewCard'
 import { safeGetItem, safeSetItem } from '../../utils/safeStorage'
-import { useMemberProjection, useMemberRosterViews } from '../../state/useMemberProjection'
+import { useMemberProjection, useMemberContributedViews, useMemberRosterViews } from '../../state/useMemberProjection'
 import type { RosterView, ActivityView, WakeView } from '../../state/memberProjectionTypes'
 
 /** The crew manager surface — the ONLY write path for member configuration.
@@ -1393,6 +1394,7 @@ export default function MembersPage() {
   // Contributed `<app>/<key>` views for the open member. Nothing to fetch: they
   // arrive in the same roster baseline and the same member_projection frames as
   // the built-in keys, which is the whole point of §5 reusing that frame.
+  const contributedViews = useMemberContributedViews(activeSlug)
   const activeEntries = useMemo(
     () => (activityView?.recent as MemberActivityEntry[] | undefined) ?? activityQuery.data?.entries ?? [],
     [activityView, activityQuery.data],
@@ -3265,6 +3267,7 @@ export default function MembersPage() {
               Configuration) so a contribution adds to the drawer's tail rather
               than displacing the member's own config. Absent entirely when no
               app has published for this member. */}
+          <ContributedViews views={contributedViews} />
             </div>
           )
           const leadingTab: SidePanelLeadingTab = {

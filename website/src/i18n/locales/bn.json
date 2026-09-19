@@ -15370,6 +15370,8 @@
       "show_controls": "কন্ট্রোল দেখাও"
     },
     "membersPage": {
+      "contributed_empty": "দেখানোর মতো কিছু নেই এখনও",
+      "contributed_more": "+{{count}} আরও",
       "drawer_delegated_working": "অর্পিত কাজ চলছে",
       "agent_template": "এজেন্ট টেমপ্লেট",
       "configuration": "কনফিগারেশন",

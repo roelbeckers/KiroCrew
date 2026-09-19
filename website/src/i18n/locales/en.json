@@ -7086,6 +7086,8 @@
     "membersPage": {
       "agent_template": "Agent template",
       "configuration": "Configuration",
+      "contributed_empty": "Nothing to show yet",
+      "contributed_more": "+{{count}} more",
       "crew_summary": "Crew summary",
       "details": "Details",
       "edit_in_crew_manager": "Edit in crew manager",
