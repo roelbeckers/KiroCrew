@@ -25,18 +25,37 @@ name: CI Runner Watchdog
 # verdicts before a human cancelled it.
 #
 # What this workflow does, every 10 minutes: run `scripts/ci/runner_watchdog.py`,
-# which lists queued / in-progress `CI` runs, and for each run older than
-# 15 minutes reads its jobs. A run is ORPHANED when a job is still `queued`,
-# carries a `codebuild-` label, and has waited more than 15 minutes (CodeBuild's
-# measured queue-to-start here is under a minute). Oldest first, at most 5 per
-# tick, the script cancels the run, waits for the cancellation to land, and
-# re-runs it. The re-run is a new attempt: `changes` recomputes the label with the
-# new attempt suffix and GitHub emits fresh `workflow_job.queued` webhooks, so
-# CodeBuild starts fresh runners. It is a FULL re-run, not `rerun-failed-jobs`:
-# the failed-jobs form does not run `changes` again, so it would re-queue the
-# routed jobs under a label whose attempt suffix is stale, and CodeBuild's
-# documentation does not say whether it honours that. One CI round is the price;
-# the alternative was a ten-hour hold.
+# which lists queued / in-progress runs REPO-WIDE — one paginated
+# `GET /repos/{repo}/actions/runs?status=…` per status returns runs of every
+# workflow at once — and keeps only those whose `path` names a workflow that
+# routes jobs to the CodeBuild fleet — `ci.yml`, `fast-gate.yml`,
+# `main-ratchet-audit.yml`, `build.yml` and eleven others, the set pinned in the
+# script as `WATCHED_WORKFLOWS` and tested against the workflows whose `runs-on`
+# actually carries the fleet label. One listing per status covers the whole
+# watched set as a client-side filter and reaches more than a per-workflow loop
+# would; paging is bounded by a page cap set above the repo's real run count.
+# This workflow itself is excluded: the label above appears only in this comment,
+# and a watchdog that cancelled and re-ran itself would never finish a tick. For
+# each run older than 15 minutes it reads its jobs. A run is ORPHANED when a job
+# is still `queued`, carries a `codebuild-` label, and has waited more than 15
+# minutes (CodeBuild's measured queue-to-start here is under a minute). Oldest
+# first across every watched workflow, at most 5 per tick as one global cap, the
+# script cancels the run, waits for the cancellation to land, and re-runs it. The
+# re-run is a new attempt: `changes` recomputes the label with the new attempt
+# suffix and GitHub emits fresh `workflow_job.queued` webhooks, so CodeBuild
+# starts fresh runners. It
+# is a FULL re-run, not `rerun-failed-jobs`: the failed-jobs form does not run
+# `changes` again, so it would re-queue the routed jobs under a label whose attempt
+# suffix is stale, and CodeBuild's documentation does not say whether it honours
+# that. One CI round is the price; the alternative was a ten-hour hold.
+#
+# A GitHub rate limit is survivable. A 403 or 429 whose body names a rate limit is
+# honoured against its `Retry-After` / `X-RateLimit-Reset` with one cheap in-budget
+# retry; a further-off reset stops the gathering, acts on the runs already
+# classified, and ends the tick with an `aborted-rate-limited` outcome the summary
+# names — the job exits 0, so the tick is neither a red failure nor an all-clear,
+# and the next tick re-lists. Every other status (401, 404, 5xx) and every
+# malformed payload still raises.
 #
 # Slow is not dead. A `codebuild-` job queued past the threshold is also what
 # CodeBuild account-concurrency saturation looks like, and re-running saturated
@@ -112,7 +131,12 @@ name: CI Runner Watchdog
 #     cancelled jobs (`codebuild-` label, no runner name, queued past the
 #     threshold when cancelled), and re-runs only those still the newest run of
 #     their branch -- an older, superseded pull-request run has nothing left to
-#     say, and re-running it would cancel its successor through the group;
+#     say, and re-running it would cancel its successor through the group. That
+#     pass walks its window oldest first and classifies at most
+#     `RECOVERY_CLASSIFY_READS` runs per tick: every `main` push cancels the run
+#     it supersedes, so one window holds hundreds of cancelled runs and each
+#     costs a job read, and spending the bound on the oldest keeps a newer
+#     arrival from displacing a run about to age out;
 #   - a refused cancel, or a re-run the API refuses (403: someone re-ran it by
 #     hand first), is logged and skipped;
 #   - `dry_run` performs every read and no write.

@@ -719,14 +719,26 @@ Details worth knowing:
     carries a watchdog rather than waiting for it:
     `.github/workflows/ci-runner-watchdog.yml` runs `scripts/ci/runner_watchdog.py`
     every ten minutes on `ubuntu-latest` (never on CodeBuild — a watchdog for a
-    path cannot depend on that path). It lists the queued and in-progress `CI`
-    runs, and calls a run *orphaned* when one of its jobs is still `queued`,
+    path cannot depend on that path). It lists the queued and in-progress runs
+    REPO-WIDE — one paginated `GET /repos/{repo}/actions/runs?status=…` per
+    status returns runs of every workflow at once — and keeps only those whose
+    `path` names a workflow that routes jobs to the CodeBuild fleet — `ci.yml`,
+    `fast-gate.yml`, `main-ratchet-audit.yml`, `build.yml` and eleven others,
+    the set pinned in the script as `WATCHED_WORKFLOWS` and tested against the
+    workflows whose `runs-on` actually carries the fleet label (the watchdog's
+    own workflow is excluded, since that label appears only in its comment). One
+    listing per status covers the whole watched set as a client-side filter and
+    reaches more than a per-workflow loop would, with paging bounded by a page
+    cap set above the repo's real run count; it
+    calls a run *orphaned* when one of its jobs is still `queued`,
     carries a `codebuild-` label, and has waited more than 15 minutes
     (queue-to-start on CodeBuild is measured in seconds here, so that margin is
     generous). It then cancels the run, waits for the cancellation to land, and
     re-runs it: the re-run is a new attempt, so `changes` recomputes the label
     with the new attempt suffix and GitHub emits fresh `workflow_job.queued`
-    webhooks that start fresh runners. The watchdog re-runs *all* jobs rather
+    webhooks that start fresh runners. The re-run cap of five per tick is one
+    global budget across every watched workflow, not five per workflow. The
+    watchdog re-runs *all* jobs rather
     than only the failed ones, because `gh run rerun --failed` reuses the first
     attempt's `changes` outputs and therefore re-queues the routed jobs under a
     label whose attempt suffix is stale, and CodeBuild's documentation does not
@@ -804,7 +816,22 @@ Details worth knowing:
     outage leaves it queued until the fleet returns, whereas holding it would
     let the recovery window expire and abandon it silently. It runs before the
     live heals and takes the per-tick cap first, so a sustained backlog of live
-    orphans cannot starve it until the window expires. **The schedule ships disarmed**: `WATCHDOG_ARMED` at the top of the
+    orphans cannot starve it until the window expires. It walks the window
+    **oldest first** and classifies at most `RECOVERY_CLASSIFY_READS` (50) runs
+    per tick, because every `main` push cancels the run it supersedes and one
+    90-minute window holds hundreds of cancelled runs (300 measured), each
+    costing a job read: the bound spends those reads on the runs closest to
+    ageing out, and a newer arrival waits for the next tick instead of
+    displacing an older orphan. **A GitHub rate limit is
+    survivable, not a lost tick.** A 403 or 429 whose body names a rate limit is
+    honoured against its `Retry-After` / `X-RateLimit-Reset` with one cheap,
+    in-budget wait-and-retry; when the reset is too far off, the tick stops
+    gathering, acts on the runs it already classified, and ends with an
+    `aborted-rate-limited` outcome the summary names. That outcome exits the job
+    0, so a rate-limited tick is neither a red failure nor an all-clear, and the
+    next tick re-lists; one exhausted listing page leaves the runs already
+    classified acted on rather than lost. Every other status (401, 404, 5xx) and every malformed
+    payload still raises. **The schedule ships disarmed**: `WATCHDOG_ARMED` at the top of the
     workflow is `"false"`, so every scheduled tick is a dry run — it classifies
     and writes its step summary but touches nothing — until a maintainer, having
     read a few summaries against real API shapes and seen no healthy run called

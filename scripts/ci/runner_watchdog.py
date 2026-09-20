@@ -24,15 +24,42 @@ and then evicted by the next push. One orphaned shard blocked verdicts on
 
 What this script does
 ---------------------
-Lists ``ci.yml`` runs that are ``queued``, ``in_progress`` or ``pending``, reads
-each run's jobs, and calls a run ORPHANED when at least one job is still
-``queued``, carries a ``codebuild-`` label, and has waited longer than
+Lists ``queued``, ``in_progress`` and ``pending`` runs REPO-WIDE -- one paginated
+``GET /repos/{repo}/actions/runs?status=…`` per status returns runs of every
+workflow at once -- and keeps only those whose ``path`` names a workflow that
+routes jobs to the CodeBuild fleet (``WATCHED_WORKFLOWS`` -- the label
+``codebuild-kirocrew-gha`` reaches ``ci.yml``, ``fast-gate.yml``,
+``main-ratchet-audit.yml``, ``build.yml`` and eleven others). One listing per
+status covers the whole watched set, and covers strictly more than a
+per-workflow loop would: a fleet-routed workflow nobody registered is still
+returned, and dropped only because it is not watched. It then reads each kept
+run's jobs and calls a run ORPHANED when at least one job is still ``queued``,
+carries a ``codebuild-`` label, and has waited longer than
 ``Policy.orphan_after`` (15 minutes). CodeBuild's measured queue-to-start on this
 repository is under a minute, so a quarter of an hour is far outside any
-legitimate wait. For each orphaned run, oldest first and at most
-``Policy.max_runs`` (5) per invocation, it cancels the run, waits for the cancellation to land, then
+legitimate wait. For each orphaned run, oldest first across every watched
+workflow and at most ``Policy.max_runs`` (5) per invocation as one global cap,
+it cancels the run, waits for the cancellation to land, then
 re-runs it. The re-run creates a new run attempt, which produces fresh
 ``workflow_job.queued`` webhooks and a fresh runner label.
+
+The watched set is a fixed tuple, not read from disk, and it is a client-side
+FILTER on the repo-wide listing rather than a set of endpoints to poll: a
+workflow that gains a fleet route without being added here goes unhealed even
+though the listing returns it, and a workflow that loses one is still filtered in
+harmlessly. A test pins the tuple to the set of workflows whose ``runs-on``
+actually routes to the fleet, and pins ``ci-runner-watchdog.yml`` out of it --
+its own comment names the label, and a watchdog that cancelled and re-ran itself
+would never finish a tick.
+
+A GitHub rate limit is survivable, not fatal. A 403 or 429 whose body names a
+rate limit is honoured against its ``Retry-After`` / ``X-RateLimit-Reset`` with
+one cheap in-budget retry; when the reset is too far off, the tick stops
+gathering, acts on the runs it has already classified, and ends non-fatally
+with an ``aborted-rate-limited`` outcome that the summary names. Such a tick is
+neither a clean all-quiet nor a red failure: the next tick re-lists. Every other
+status -- 401, 404, 5xx -- and every malformed payload still raises exactly as
+before.
 
 The re-run is a FULL re-run, not ``rerun-failed-jobs``, because of how the
 label is computed: ``ci.yml`` computes it ONCE, in its ``changes`` job, and the
@@ -151,16 +178,72 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Protocol
 
 CODEBUILD_LABEL_PREFIX = "codebuild-"
-WORKFLOW_FILE = "ci.yml"
+# Every workflow whose `runs-on` routes at least one job to the CodeBuild
+# fleet at this repository. The watchdog lists and heals runs of each. The
+# fleet label (`codebuild-kirocrew-gha-…`) is the membership signal; a test
+# pins this tuple to the set of workflows whose `runs-on` actually carries it.
+# `ci-runner-watchdog.yml` is deliberately absent: the label appears only in
+# its own explanatory comment, and a watchdog must never cancel or re-run
+# itself out from under a tick.
+WATCHED_WORKFLOWS: tuple[str, ...] = (
+    "build-wheel.yml",
+    "build.yml",
+    "ci.yml",
+    "code-review.yml",
+    "cross-platform.yml",
+    "dependency-review.yml",
+    "dependency-vulnerability.yml",
+    "fast-gate.yml",
+    "macos-on-demand.yml",
+    "main-ratchet-audit.yml",
+    "pages.yml",
+    "pr-merge-conflict-label.yml",
+    "pr-scope.yml",
+    "release.yml",
+    "screenshot-evidence.yml",
+)
+# Put the workflows that carry routine pull-request traffic ahead of release
+# and audit workflows when looking for recent fleet starts.
+COMPLETED_SAMPLE_WORKFLOWS: tuple[str, ...] = (
+    "ci.yml",
+    "fast-gate.yml",
+    "code-review.yml",
+) + tuple(
+    workflow
+    for workflow in WATCHED_WORKFLOWS
+    if workflow not in {"ci.yml", "fast-gate.yml", "code-review.yml"}
+)
+# The membership test for a run listed repo-wide: a run's `path` places it in a
+# workflow, and only the watched ones are kept. A frozenset because it is
+# consulted once per listed run across the whole repo, not once per watched
+# workflow.
+_WATCHED_SET = frozenset(WATCHED_WORKFLOWS)
+# The watchdog's own workflow, never watched: its comment names the fleet label.
+WATCHDOG_WORKFLOW = "ci-runner-watchdog.yml"
+# A rate-limited call whose window resets within this many seconds, and inside
+# the tick's remaining budget, is waited out and retried once; a further-off
+# reset aborts the gather instead of burning budget on a sleep.
+RATE_LIMIT_RETRY_SECONDS = 30.0
+# The synthetic run id under which a rate-limited abort records its outcome, so
+# the summary can name it. No real workflow run carries id 0.
+RATE_LIMIT_MARKER_ID = 0
 # `pending` runs are held by their concurrency group and have no jobs; they are
 # listed so the summary can say WHY they wait, never acted on.
 CANDIDATE_STATUSES = ("in_progress", "queued", "pending")
 PAGE_SIZE = 100
+# The repo-wide run listing (`GET /repos/{repo}/actions/runs?status=…`) returns
+# runs of EVERY workflow, so one paginated call per status covers the watched set
+# instead of one call per watched workflow. An orphan is an OLD run and rides at
+# the tail of the newest-first listing, so paging must reach it -- this cap is set
+# well above the repo's observed peak (~172 concurrent runs, so ~2 full pages) to
+# do that while still bounding a runaway that would otherwise page forever.
+REPO_LISTING_MAX_PAGES = 8
 # A run is re-run whole so `changes` recomputes the per-attempt runner label.
 RERUN_ENDPOINT = "rerun"
 # A recent CodeBuild start that waited at least this fraction of the orphan
@@ -169,6 +252,14 @@ SATURATION_FRACTION = 3
 # When no live run shows a recent CodeBuild start, this many newest completed
 # runs are read for one before anything is healed.
 COMPLETED_SAMPLE = 10
+# How many in-window cancelled runs the recovery pass reads the jobs of per tick.
+# Every `main` push cancels the run it supersedes, so this repo holds hundreds of
+# cancelled runs inside one recovery window (300 measured in a 90-minute window),
+# and classifying each costs one job read. The pass walks the oldest cancellation
+# updates first, so the bound spends its reads on the runs closest to ageing out
+# of the window and a newer update waits for the next tick rather than displacing
+# an older orphan.
+RECOVERY_CLASSIFY_READS = 50
 # How long to wait after a re-run before re-checking that no newer run of the
 # branch appeared in the window: GitHub applies the concurrency group's
 # cancellation asynchronously.
@@ -215,6 +306,9 @@ SKIPPED_SATURATED = "skipped-saturated"
 SKIPPED_NO_DISPATCH_EVIDENCE = "skipped-no-dispatch-evidence"
 LOOKUP_INCONCLUSIVE = "lookup-inconclusive"
 WAITING_ON_GROUP = "waiting-on-group"
+# Not a run verdict but a tick-level one: the marker RunVerdict carries it so the
+# summary can report that gathering stopped on a rate limit.
+TICK_ABORTED_RATE_LIMITED = "tick-aborted-rate-limited"
 
 # Outcomes of acting on a run.
 OUTCOME_DRY_RUN = "dry-run"
@@ -235,6 +329,10 @@ OUTCOME_CANCEL_TIMED_OUT = "cancel-timed-out"
 OUTCOME_RERUN_DEFERRED = "rerun-deferred-out-of-time"
 OUTCOME_RERUN_REFUSED = "rerun-refused"
 OUTCOME_NOT_ATTEMPTED = "not-attempted-cap-reached"
+# A tick that a rate limit cut short. Explicitly NOT a failed outcome: the runs
+# it did classify were acted on and the next tick re-lists, so it neither reds
+# the workflow nor reports an all-clear.
+OUTCOME_ABORTED_RATE_LIMITED = "aborted-rate-limited"
 
 # Outcomes that mean a verdict may have been lost: the tick exits 1 on any of them
 # so the workflow run goes red and its log names the run and the command to type.
@@ -282,12 +380,37 @@ class ApiError(Exception):
     the client -- a second cancel or re-run on top of one that landed is a
     conflict, and a conflict would be misread as a refusal. The caller
     reconciles from the run's own state instead.
+
+    ``retry_after`` and ``remaining`` carry the rate-limit hints from the
+    response headers (seconds until the window resets, and the remaining quota),
+    so the caller can wait out a cheap reset or abort a far-off one. ``rate_limited``
+    is true only for a 403/429 the body or headers identify as a quota exhaustion,
+    which the gather loop treats as a stop-and-report signal rather than a crash.
     """
 
-    def __init__(self, status: int, message: str, *, ambiguous: bool = False) -> None:
-        super().__init__(f"HTTP {status}: {_safe_text(message)}")
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        *,
+        ambiguous: bool = False,
+        retry_after: float | None = None,
+        remaining: str | None = None,
+    ) -> None:
+        self._message = _safe_text(message)
+        super().__init__(f"HTTP {status}: {self._message}")
         self.status = status
         self.ambiguous = ambiguous
+        self.retry_after = retry_after
+        self.remaining = remaining
+
+    @property
+    def rate_limited(self) -> bool:
+        if self.status not in (403, 429):
+            return False
+        if "rate limit" in self._message.lower():
+            return True
+        return self.remaining == "0"
 
 
 class Api(Protocol):
@@ -296,6 +419,33 @@ class Api(Protocol):
     def get(self, path: str) -> Any: ...
 
     def post(self, path: str) -> None: ...
+
+
+def _rate_limit_hints(headers: Any) -> tuple[float | None, str | None]:
+    """Seconds until the rate-limit window resets, and the remaining quota, from headers.
+
+    ``Retry-After`` (seconds) is honoured first -- it is what a secondary rate
+    limit sends. Otherwise ``X-RateLimit-Reset`` (an epoch second) gives the
+    wait when the quota is spent (``X-RateLimit-Remaining`` is ``0``). A missing
+    or non-numeric header yields ``None``, so a caller with no usable hint aborts
+    rather than guessing a wait.
+    """
+    if headers is None:
+        return None, None
+    remaining = headers.get("X-RateLimit-Remaining")
+    retry_after = headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after)), remaining
+        except (TypeError, ValueError):
+            pass
+    reset = headers.get("X-RateLimit-Reset")
+    if reset and remaining == "0":
+        try:
+            return max(0.0, float(reset) - time.time()), remaining
+        except (TypeError, ValueError):
+            pass
+    return None, remaining
 
 
 class GitHubApi:
@@ -349,7 +499,10 @@ class GitHubApi:
                         self._sleep(2)
                         continue
                     raise ApiError(exc.code, detail, ambiguous=mutation) from exc
-                raise ApiError(exc.code, detail) from exc
+                retry_after, remaining = _rate_limit_hints(exc.headers)
+                raise ApiError(
+                    exc.code, detail, retry_after=retry_after, remaining=remaining
+                ) from exc
             except urllib.error.URLError as exc:
                 # Usually the connection itself failed, but a timeout while
                 # sending or awaiting the response surfaces here too, and then
@@ -398,6 +551,7 @@ class RunVerdict:
     url: str
     age: timedelta
     verdict: str
+    workflow: str
     orphans: list[OrphanedJob] = field(default_factory=list)
     detail: str = ""
 
@@ -417,7 +571,6 @@ class Policy:
     group_wait_after: timedelta = timedelta(minutes=30)
     max_attempt: int = 3
     max_runs: int = 5
-    list_cap: int = 50
     heal_budget: timedelta = timedelta(seconds=300)
     # Wall clock for the whole invocation, from the first listing to the last
     # re-run. Mutations that start an ownership chain (a re-run and its
@@ -459,8 +612,17 @@ def is_fork_run(run: dict[str, Any], repo: str) -> bool:
     return bool(full_name) and full_name.lower() != repo.lower()
 
 
+def _workflow_of(run: dict[str, Any]) -> str | None:
+    """The workflow file a run belongs to, from its ``path`` (``.github/workflows/X.yml``)."""
+    name = str(run.get("path") or "").rsplit("/", 1)[-1]
+    return name or None
+
+
 def _base_verdict(run: dict[str, Any], now: datetime) -> RunVerdict:
     created = parse_timestamp(run["created_at"])
+    workflow = _workflow_of(run)
+    if workflow is None:
+        raise ValueError("run payload has no usable workflow path")
     return RunVerdict(
         run_id=int(run["id"]),
         run_attempt=int(run.get("run_attempt") or 1),
@@ -471,6 +633,7 @@ def _base_verdict(run: dict[str, Any], now: datetime) -> RunVerdict:
         url=_safe_text(run.get("html_url")),
         age=now - created,
         verdict=HEALTHY,
+        workflow=workflow,
     )
 
 
@@ -658,12 +821,66 @@ def _orphan(job: dict[str, Any], queued_for: timedelta) -> OrphanedJob:
     )
 
 
-def _runs_path(repo: str) -> str:
-    return f"repos/{repo}/actions/workflows/{WORKFLOW_FILE}/runs"
+def _runs_path(repo: str, workflow: str) -> str:
+    return f"repos/{repo}/actions/workflows/{workflow}/runs"
 
 
-def list_runs(api: Api, repo: str, *, status: str, cap: int) -> list[dict[str, Any]]:
-    """Newest ``ci.yml`` runs with the given status filter, at most ``cap``, oldest first."""
+def _iter_repo_runs(
+    api: Api,
+    repo: str,
+    *,
+    status: str,
+    max_pages: int,
+    get: Callable[[str], Any] | None = None,
+    log: Callable[[str], None] = print,
+) -> Iterator[dict[str, Any]]:
+    """Yield runs of EVERY workflow with the given status, newest first, across at
+    most ``max_pages`` pages of ``PAGE_SIZE``.
+
+    ``GET /repos/{repo}/actions/runs?status=…`` is repo-wide: one paginated call
+    returns runs of every workflow, so a single call chain per status covers the
+    watched set. The caller filters to the watched set from each run's ``path``. Paging stops at
+    the first short or empty page, or at ``max_pages`` -- the page cap that bounds a
+    runaway; because an orphan is an old run at the tail of the newest-first
+    listing, that cap is set high enough (see ``REPO_LISTING_MAX_PAGES``) to reach
+    it under the repo's real load.
+    """
+    fetch = get or api.get
+    page = 1
+    while page <= max_pages:
+        # The page size never changes between pages: ``page`` is an offset in
+        # units of ``per_page``, so a smaller page would re-read the head of the
+        # listing and never reach the runs it was meant to fetch.
+        query = urllib.parse.urlencode({"status": status, "per_page": PAGE_SIZE, "page": page})
+        payload = fetch(f"repos/{repo}/actions/runs?{query}")
+        batch = (payload or {}).get("workflow_runs") or []
+        if not batch:
+            return
+        yield from batch
+        if len(batch) < PAGE_SIZE:
+            return
+        if page == max_pages:
+            log(
+                f"::warning::{status} run listing truncated after {max_pages} full "
+                f"page(s) of {PAGE_SIZE}; older runs were not read"
+            )
+            return
+        page += 1
+
+
+def _is_watched(run: dict[str, Any]) -> bool:
+    """Whether a repo-wide-listed run belongs to a watched workflow, by its ``path``."""
+    return _workflow_of(run) in _WATCHED_SET
+
+
+def list_runs(api: Api, repo: str, workflow: str, *, status: str, cap: int) -> list[dict[str, Any]]:
+    """Newest runs of one watched workflow with the given status filter, at most
+    ``cap``, oldest first.
+
+    Workflow-scoped on purpose: its one caller is the completed-run evidence
+    sample, which reads at most ``COMPLETED_SAMPLE`` runs total and would gain
+    nothing from a repo-wide listing (the fleet is shared, so any workflow's start
+    is evidence, and the total is already capped)."""
     runs: list[dict[str, Any]] = []
     page = 1
     while len(runs) < cap:
@@ -671,7 +888,7 @@ def list_runs(api: Api, repo: str, *, status: str, cap: int) -> list[dict[str, A
         # units of ``per_page``, so a smaller final page would re-read the head
         # of the listing and never reach the runs it was meant to fetch.
         query = urllib.parse.urlencode({"status": status, "per_page": PAGE_SIZE, "page": page})
-        payload = api.get(f"{_runs_path(repo)}?{query}")
+        payload = api.get(f"{_runs_path(repo, workflow)}?{query}")
         batch = (payload or {}).get("workflow_runs") or []
         if not batch:
             break
@@ -683,13 +900,78 @@ def list_runs(api: Api, repo: str, *, status: str, cap: int) -> list[dict[str, A
     return sorted(runs, key=lambda run: run["created_at"])
 
 
-def list_candidate_runs(api: Api, repo: str, *, cap: int) -> list[dict[str, Any]]:
-    """Live runs across every candidate status, deduplicated, oldest first."""
+def gather_all_candidate_runs(
+    api: Api,
+    repo: str,
+    *,
+    get: Callable[[str], Any] | None = None,
+    log: Callable[[str], None] = print,
+) -> tuple[list[dict[str, Any]], ApiError | None]:
+    """Live runs of every watched workflow plus any rate-limit abort, oldest first.
+
+    One paginated repo-wide listing per candidate status covers every workflow at
+    once, and each run is kept only if its ``path`` names a watched workflow. This
+    is one listing per status instead of one per watched workflow, and it covers
+    strictly more: a fleet-routed workflow nobody registered is still returned (and
+    dropped only because it is not in the watched set). No newest-N truncation is
+    applied here -- an orphan is an OLD run at the tail of the newest-first
+    listing, so keeping only the newest N would discard exactly the runs being
+    hunted; the page cap bounds the listing cost, and the global per-tick heal cap
+    still bounds how many runs are acted on.
+    """
     seen: dict[int, dict[str, Any]] = {}
-    for status in CANDIDATE_STATUSES:
-        for run in list_runs(api, repo, status=status, cap=cap):
-            seen.setdefault(int(run["id"]), run)
-    return sorted(seen.values(), key=lambda run: run["created_at"])
+    try:
+        for status in CANDIDATE_STATUSES:
+            for run in _iter_repo_runs(
+                api,
+                repo,
+                status=status,
+                max_pages=REPO_LISTING_MAX_PAGES,
+                get=get,
+                log=log,
+            ):
+                if _is_watched(run):
+                    seen.setdefault(int(run["id"]), run)
+    except ApiError as exc:
+        if not exc.rate_limited:
+            raise
+        return sorted(seen.values(), key=lambda run: run["created_at"]), exc
+    return sorted(seen.values(), key=lambda run: run["created_at"]), None
+
+
+def list_all_candidate_runs(
+    api: Api, repo: str, *, log: Callable[[str], None] = print
+) -> list[dict[str, Any]]:
+    """Live runs of every watched workflow, deduplicated, oldest first."""
+    runs, aborted = gather_all_candidate_runs(api, repo, log=log)
+    if aborted is not None:
+        raise aborted
+    return runs
+
+
+def list_recent_cancelled_runs(
+    api: Api, repo: str, *, log: Callable[[str], None] = print
+) -> list[dict[str, Any]]:
+    """Cancelled runs of every watched workflow, oldest cancellation update first.
+
+    One paginated repo-wide ``status=cancelled`` listing filtered to the watched
+    set. The recovery pass drops runs outside its window, the page cap bounds the
+    observation cost, and the recovery action budget bounds re-runs.
+    """
+    watched: dict[int, dict[str, Any]] = {}
+    for run in _iter_repo_runs(
+        api,
+        repo,
+        status="cancelled",
+        max_pages=REPO_LISTING_MAX_PAGES,
+        log=log,
+    ):
+        if _is_watched(run):
+            watched.setdefault(int(run["id"]), run)
+    return sorted(
+        watched.values(),
+        key=lambda run: parse_timestamp(str(run.get("updated_at") or run["created_at"])),
+    )
 
 
 def list_jobs(api: Api, repo: str, run_id: int) -> list[dict[str, Any]]:
@@ -737,7 +1019,7 @@ def newest_run_id_for_branch(api: Api, repo: str, verdict: RunVerdict) -> int:
             }
         )
         try:
-            payload = api.get(f"{_runs_path(repo)}?{query}")
+            payload = api.get(f"{_runs_path(repo, verdict.workflow)}?{query}")
         except ApiError as exc:
             # The listing is the only thing standing between a re-run and a
             # newer run's concurrency group; without it no verdict is safe.
@@ -988,14 +1270,25 @@ def heal_runs(
 
 
 def sample_completed_runs(api: Api, policy: Policy, evidence: DispatchEvidence) -> None:
-    """Absorb the newest completed runs' CodeBuild starts, at most once per evidence set."""
+    """Absorb recent completed runs' CodeBuild starts, at most once per evidence set.
+
+    The fleet is shared across every watched workflow, so a prompt start in any
+    of them is evidence it is dispatching. To bound the cost, at most
+    ``COMPLETED_SAMPLE`` completed runs are read in total across the watched
+    workflows, high-traffic workflows first.
+    """
     evidence.completed_sampled = True
-    for run in list_runs(api, policy.repo, status="completed", cap=COMPLETED_SAMPLE):
-        if policy.now - parse_timestamp(str(run.get("updated_at") or run["created_at"])) > (
-            policy.saturation_lookback
-        ):
-            continue
-        evidence.absorb(list_jobs(api, policy.repo, int(run["id"])), policy)
+    remaining = COMPLETED_SAMPLE
+    for workflow in COMPLETED_SAMPLE_WORKFLOWS:
+        if remaining <= 0:
+            break
+        for run in list_runs(api, policy.repo, workflow, status="completed", cap=remaining):
+            if policy.now - parse_timestamp(str(run.get("updated_at") or run["created_at"])) > (
+                policy.saturation_lookback
+            ):
+                continue
+            remaining -= 1
+            evidence.absorb(list_jobs(api, policy.repo, int(run["id"])), policy)
 
 
 def resolve_hold(
@@ -1365,10 +1658,19 @@ def recover_cancelled_runs(
     """
     verdicts: list[RunVerdict] = []
     outcomes: dict[int, str] = {}
-    for run in list_runs(api, policy.repo, status="cancelled", cap=policy.list_cap):
+    cancelled_runs = list_recent_cancelled_runs(api, policy.repo, log=log)
+    reads_left = RECOVERY_CLASSIFY_READS
+    for run in cancelled_runs:
         updated = parse_timestamp(str(run.get("updated_at") or run["created_at"]))
         if policy.now - updated > policy.recovery_window:
             continue
+        if reads_left <= 0:
+            log(
+                f"reached the per-tick cap of {RECOVERY_CLASSIFY_READS} cancelled runs to "
+                "classify; the rest are left for the next tick"
+            )
+            break
+        reads_left -= 1
         try:
             jobs = list_jobs(api, policy.repo, int(run["id"]))
         except ApiError as exc:
@@ -1439,12 +1741,20 @@ def _md_link(verdict: RunVerdict) -> str:
 def render_summary(verdicts: list[RunVerdict], outcomes: dict[int, str], policy: Policy) -> str:
     lines = ["## CI runner watchdog", ""]
     lines.append(f"Mode: {'dry run' if policy.dry_run else 'live'}.")
-    lines.append(f"Inspected {len(verdicts)} run(s).")
+    aborted_markers = [v for v in verdicts if v.verdict == TICK_ABORTED_RATE_LIMITED]
+    real = [v for v in verdicts if v.verdict != TICK_ABORTED_RATE_LIMITED]
+    lines.append(f"Inspected {len(real)} run(s).")
+    if aborted_markers:
+        lines.append("")
+        lines.append(
+            f"Aborted (rate limited): {_md(aborted_markers[0].detail)} -- acted on the runs already "
+            f"classified; the next tick re-lists."
+        )
     lines.append("")
-    acted = [v for v in verdicts if v.actionable]
+    acted = [v for v in real if v.actionable]
     reported = [
         v
-        for v in verdicts
+        for v in real
         if v.verdict
         in (
             SKIPPED_FORK,
@@ -1456,7 +1766,11 @@ def render_summary(verdicts: list[RunVerdict], outcomes: dict[int, str], policy:
         )
     ]
     if not acted and not reported:
-        lines.append("Nothing stuck.")
+        lines.append(
+            "No run was classified before the tick aborted."
+            if aborted_markers
+            else "Nothing stuck."
+        )
         return "\n".join(lines) + "\n"
     if acted:
         lines.append("| Run | Attempt | Branch | Age | Orphaned jobs | Outcome |")
@@ -1496,40 +1810,103 @@ def run_watchdog(
         started_at=policy.now,
         started_clock=start,
     )
-    for run in list_candidate_runs(api, policy.repo, cap=policy.list_cap):
-        # Jobs are read for EVERY run, young ones included: a young run is never
-        # actionable, but a recent slow CodeBuild start inside it is exactly the
-        # saturation evidence that must hold the watchdog back from older runs.
-        jobs = list_jobs(api, policy.repo, int(run["id"]))
-        verdict = classify_run(run, jobs, policy)
-        log(f"{_label(verdict)}: {verdict.verdict} -- {verdict.detail}")
-        for orphan in verdict.orphans:
-            log(
-                f"  queued {_fmt_delta(orphan.queued_for)} with no runner: {orphan.name} {list(orphan.labels)}"
-            )
-        verdicts.append(verdict)
-        evidence.absorb(jobs, policy)
+    aborted: str | None = None
 
-    # The hold is judged per run, relative to when its NEWEST orphaned job
-    # queued: a start that postdates an older orphan may still predate a
-    # younger one, in another run or in the same one.
-    for verdict in verdicts:
-        if verdict.verdict != ORPHANED:
-            continue
-        hold = resolve_hold(api, policy, evidence, _latest_queue(verdict))
-        if hold is not None:
-            verdict.verdict, verdict.detail = hold
-            log(f"::warning::{_label(verdict)}: {verdict.detail}")
+    def cheap_retry(thunk: Callable[[], Any]) -> Any:
+        """Run ``thunk``; on a rate limit whose reset is cheap and in budget, wait once and retry.
+
+        A rate-limit whose reset is unknown or too far off, or a second one on
+        the retry, propagates -- the gather catches it and ends the tick. Every
+        other ApiError passes straight through, so 401/404/5xx keep raising.
+        """
+        try:
+            return thunk()
+        except ApiError as exc:
+            if not exc.rate_limited:
+                raise
+            wait = exc.retry_after
+            if (
+                wait is not None
+                and 0 <= wait <= RATE_LIMIT_RETRY_SECONDS
+                and tick.remaining() - wait >= RERUN_RESERVE_SECONDS
+            ):
+                log(
+                    f"rate limited ({exc}); the window resets in {int(wait)} s, within budget -- "
+                    f"waiting once and retrying"
+                )
+                sleep(wait)
+                return thunk()
+            raise
+
+    try:
+        candidate_runs, listing_abort = gather_all_candidate_runs(
+            api,
+            policy.repo,
+            get=lambda path: cheap_retry(lambda: api.get(path)),
+            log=log,
+        )
+        for run in candidate_runs:
+            # Jobs are read for EVERY run, young ones included: a young run is never
+            # actionable, but a recent slow CodeBuild start inside it is exactly the
+            # saturation evidence that must hold the watchdog back from older runs.
+            jobs = cheap_retry(lambda run=run: list_jobs(api, policy.repo, int(run["id"])))
+            verdict = classify_run(run, jobs, policy)
+            log(f"{_label(verdict)}: {verdict.verdict} -- {verdict.detail}")
+            for orphan in verdict.orphans:
+                log(
+                    f"  queued {_fmt_delta(orphan.queued_for)} with no runner: {orphan.name} {list(orphan.labels)}"
+                )
+            verdicts.append(verdict)
+            evidence.absorb(jobs, policy)
+
+        if listing_abort is not None:
+            raise listing_abort
+
+        # The hold is judged per run, relative to when its NEWEST orphaned job
+        # queued: a start that postdates an older orphan may still predate a
+        # younger one, in another run or in the same one.
+        for verdict in verdicts:
+            if verdict.verdict != ORPHANED:
+                continue
+            hold = resolve_hold(api, policy, evidence, _latest_queue(verdict))
+            if hold is not None:
+                verdict.verdict, verdict.detail = hold
+                log(f"::warning::{_label(verdict)}: {verdict.detail}")
+    except ApiError as exc:
+        # A rate limit stops gathering rather than losing the whole tick: the
+        # runs classified ahead of it are acted on below (heal_runs re-reads the
+        # fleet's state and holds anything it cannot verify), and the next tick
+        # re-lists. Any other error is the caller's to raise, untouched here.
+        if not exc.rate_limited:
+            raise
+        aborted = str(exc)
+        log(
+            f"::warning::the tick hit a GitHub rate limit while gathering ({exc}); it stops listing, "
+            f"acts on the {len(verdicts)} run(s) already classified, and the next tick re-lists"
+        )
 
     # Recovery goes FIRST and takes the per-tick cap before live heals do. A
     # cancelled orphan has already lost its verdict and only a re-run brings it
     # back, whereas a live orphan loses nothing by waiting one more tick; were
     # live heals served first, a sustained backlog of five live orphans per
     # tick would starve recovery until the cancelled run aged out of the
-    # recovery window and its verdict was gone for good.
-    recovered, recovered_outcomes = recover_cancelled_runs(
-        api, policy, budget=policy.max_runs, tick=tick, log=log
-    )
+    # recovery window and its verdict was gone for good. A rate limit here is
+    # non-fatal too: the recovery pass is left for the next tick.
+    recovered: list[RunVerdict] = []
+    recovered_outcomes: dict[int, str] = {}
+    if aborted is None:
+        try:
+            recovered, recovered_outcomes = recover_cancelled_runs(
+                api, policy, budget=policy.max_runs, tick=tick, log=log
+            )
+        except ApiError as exc:
+            if not exc.rate_limited:
+                raise
+            aborted = str(exc)
+            log(
+                f"::warning::the recovery pass hit a GitHub rate limit ({exc}); it is left for the "
+                f"next tick"
+            )
     slots_used = sum(
         1
         for v in recovered
@@ -1555,7 +1932,7 @@ def run_watchdog(
         read_at = replace(policy, now=tick.now())
         try:
             latest = DispatchEvidence()
-            for run in list_candidate_runs(api, policy.repo, cap=policy.list_cap):
+            for run in list_all_candidate_runs(api, policy.repo, log=log):
                 latest.absorb(list_jobs(api, policy.repo, int(run["id"])), read_at)
             sample_completed_runs(api, read_at, latest)
             fresh["evidence"] = latest
@@ -1589,6 +1966,26 @@ def run_watchdog(
 
     verdicts.extend(recovered)
     outcomes.update(recovered_outcomes)
+    if aborted is not None:
+        # A synthetic verdict carries the abort so the summary names it. It is
+        # not a run, so it never lands in the acted/reported tables; its outcome
+        # is deliberately outside FAILED_OUTCOMES, so the tick exits 0.
+        verdicts.append(
+            RunVerdict(
+                run_id=RATE_LIMIT_MARKER_ID,
+                run_attempt=0,
+                head_branch="",
+                head_repo="",
+                event="",
+                status="",
+                url="",
+                age=timedelta(0),
+                verdict=TICK_ABORTED_RATE_LIMITED,
+                workflow="",
+                detail=aborted,
+            )
+        )
+        outcomes[RATE_LIMIT_MARKER_ID] = OUTCOME_ABORTED_RATE_LIMITED
     return verdicts, outcomes
 
 
