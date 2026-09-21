@@ -15684,7 +15684,16 @@
       "filter_source_mine_description": "Crews que creaste en el gestor de crews",
       "filter_source_builtin_description": "Crews incluidos con {{productName}}",
       "filter_source_package_description": "Crews instalados por paquetes de capacidades",
-      "member_count_filtered": "{{shown}} de {{count}} miembros"
+      "member_count_filtered": "{{shown}} de {{count}} miembros",
+      "deploy_title": "Desplegar mi equipo",
+      "deploy_loading": "Leyendo tus despliegues…",
+      "deploy_error": "No se pudieron leer tus despliegues.",
+      "deploy_empty": "Todavía no hay ningún equipo desplegado.",
+      "deploy_in_flight": "Este lanzamiento aún está en curso.",
+      "deploy_target": "Destino SSM",
+      "deploy_retry": "Reintentar",
+      "deploy_copy": "Copiar",
+      "deploy_copied": "Copiado"
     },
     "tasksCapacityCard": {
       "title": "Tareas y capacidad",

@@ -15884,7 +15884,16 @@
       "filter_source_mine_description": "Команды, созданные вами в менеджере команд",
       "filter_source_builtin_description": "Команды, входящие в {{productName}}",
       "filter_source_package_description": "Команды, установленные пакетами возможностей",
-      "member_count_filtered": "{{shown}} из {{count}} участников"
+      "member_count_filtered": "{{shown}} из {{count}} участников",
+      "deploy_title": "Развернуть мою команду",
+      "deploy_loading": "Чтение ваших развёртываний…",
+      "deploy_error": "Не удалось прочитать ваши развёртывания.",
+      "deploy_empty": "Пока ни одна команда не развёрнута.",
+      "deploy_in_flight": "Этот запуск ещё выполняется.",
+      "deploy_target": "Цель SSM",
+      "deploy_retry": "Повторить",
+      "deploy_copy": "Копировать",
+      "deploy_copied": "Скопировано"
     },
     "tasksCapacityCard": {
       "title": "Задачи и ёмкость",

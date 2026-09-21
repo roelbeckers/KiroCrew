@@ -15683,7 +15683,16 @@
       "filter_source_mine_description": "Crew che hai creato nel gestore crew",
       "filter_source_builtin_description": "Crew inclusi in {{productName}}",
       "filter_source_package_description": "Crew installati da pacchetti di capacità",
-      "member_count_filtered": "{{shown}} membri su {{count}}"
+      "member_count_filtered": "{{shown}} membri su {{count}}",
+      "deploy_title": "Distribuisci la mia crew",
+      "deploy_loading": "Lettura delle tue distribuzioni…",
+      "deploy_error": "Non è stato possibile leggere le tue distribuzioni.",
+      "deploy_empty": "Nessuna crew è ancora distribuita.",
+      "deploy_in_flight": "Questo avvio è ancora in corso.",
+      "deploy_target": "Destinazione SSM",
+      "deploy_retry": "Riprova",
+      "deploy_copy": "Copia",
+      "deploy_copied": "Copiato"
     },
     "tasksCapacityCard": {
       "title": "Attività e capacità",

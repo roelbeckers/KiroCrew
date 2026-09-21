@@ -15283,7 +15283,16 @@
       "filter_source_mine_description": "クルーマネージャーで自分が作成したクルー",
       "filter_source_builtin_description": "{{productName}} に同梱されているクルー",
       "filter_source_package_description": "ケイパビリティパッケージによってインストールされたクルー",
-      "member_count_filtered": "{{count}} 人中 {{shown}} 人のメンバー"
+      "member_count_filtered": "{{count}} 人中 {{shown}} 人のメンバー",
+      "deploy_title": "クルーをデプロイ",
+      "deploy_loading": "デプロイを読み込んでいます…",
+      "deploy_error": "デプロイを読み込めませんでした。",
+      "deploy_empty": "まだデプロイされたクルーはありません。",
+      "deploy_in_flight": "この起動はまだ実行中です。",
+      "deploy_target": "SSM ターゲット",
+      "deploy_retry": "もう一度試す",
+      "deploy_copy": "コピー",
+      "deploy_copied": "コピーしました"
     },
     "tasksCapacityCard": {
       "title": "タスクと処理能力",

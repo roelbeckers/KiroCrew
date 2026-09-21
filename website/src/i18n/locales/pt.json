@@ -15683,7 +15683,16 @@
       "filter_source_mine_description": "Crews que você criou no gerenciador de crews",
       "filter_source_builtin_description": "Crews incluídos no {{productName}}",
       "filter_source_package_description": "Crews instalados por pacotes de capacidades",
-      "member_count_filtered": "{{shown}} de {{count}} membros"
+      "member_count_filtered": "{{shown}} de {{count}} membros",
+      "deploy_title": "Implantar minha equipe",
+      "deploy_loading": "Lendo suas implantações…",
+      "deploy_error": "Não foi possível ler suas implantações.",
+      "deploy_empty": "Nenhuma equipe foi implantada ainda.",
+      "deploy_in_flight": "Esta inicialização ainda está em andamento.",
+      "deploy_target": "Destino SSM",
+      "deploy_retry": "Tentar de novo",
+      "deploy_copy": "Copiar",
+      "deploy_copied": "Copiado"
     },
     "tasksCapacityCard": {
       "title": "Tarefas e capacidade",

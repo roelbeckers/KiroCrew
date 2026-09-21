@@ -15484,7 +15484,16 @@
       "filter_source_mine_description": "ক্রু ম্যানেজারে আপনার তৈরি করা ক্রু",
       "filter_source_builtin_description": "{{productName}}-এর সাথে আসা ক্রু",
       "filter_source_package_description": "ক্ষমতা প্যাকেজ দ্বারা ইনস্টল করা ক্রু",
-      "member_count_filtered": "{{count}} জনের মধ্যে {{shown}} জন সদস্য"
+      "member_count_filtered": "{{count}} জনের মধ্যে {{shown}} জন সদস্য",
+      "deploy_title": "আমার ক্রু ডিপ্লয় করুন",
+      "deploy_loading": "আপনার ডিপ্লয়মেন্ট পড়া হচ্ছে…",
+      "deploy_error": "আপনার ডিপ্লয়মেন্ট পড়া যায়নি।",
+      "deploy_empty": "এখনও কোনো ক্রু ডিপ্লয় করা হয়নি।",
+      "deploy_in_flight": "এই লঞ্চটি এখনও চলছে।",
+      "deploy_target": "SSM টার্গেট",
+      "deploy_retry": "আবার চেষ্টা করুন",
+      "deploy_copy": "কপি করুন",
+      "deploy_copied": "কপি হয়েছে"
     },
     "tasksCapacityCard": {
       "title": "কাজ ও সামর্থ্য",

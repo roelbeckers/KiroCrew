@@ -7194,7 +7194,16 @@
       "filter_source_mine_description": "Crews you created in the crew manager",
       "filter_source_builtin_description": "Crews that ship with {{productName}}",
       "filter_source_package_description": "Crews installed by capability packages",
-      "member_count_filtered": "{{shown}} of {{count}} members"
+      "member_count_filtered": "{{shown}} of {{count}} members",
+      "deploy_title": "Deploy my crew",
+      "deploy_loading": "Reading your deployments…",
+      "deploy_error": "Could not read your deployments.",
+      "deploy_empty": "No crew is deployed yet.",
+      "deploy_in_flight": "This launch is still running.",
+      "deploy_target": "SSM target",
+      "deploy_retry": "Try again",
+      "deploy_copy": "Copy",
+      "deploy_copied": "Copied"
     },
     "migrationPage": {
       "app_migration": "App Migration",
