@@ -24,8 +24,13 @@ KNOWLEDGE_NOTES_DIR = (
 
 SHIPPED_SMOKE = {
     "apps-discover-enable-research-lab",
+    "artifacts-library-table-and-kind-filter",
     "auth-sign-in-card-signed-out",
+    "capabilities-agents-list-and-open-editor",
+    "capabilities-skills-filter-and-open-builtin",
     "chat-switch-seeded-sessions",
+    "connections-services-search-and-mcp-list",
+    "memory-open-browser-from-overview",
     "schedule-list-calendar-executions-views",
     "search-everywhere-jump-to-setting",
     "sessions-new-chat",
@@ -53,8 +58,11 @@ class TestShippedScenarios:
         for s in smoke:
             assert len(s.steps) <= 5, s.name
             assert s.max_steps <= 14, s.name
-        assert sum(s.max_steps for s in smoke) <= 120
-        assert sum(s.max_seconds for s in smoke) <= 3000
+        # The tier totals are pinned to their true values: a new smoke scenario moves
+        # them on purpose, alongside a look at the lane's cost note
+        # (docs/build/gui-user-test.md, "Cost and limits"), never silently.
+        assert sum(s.max_steps for s in smoke) == 158
+        assert sum(s.max_seconds for s in smoke) == 4080
 
     def test_nightly_includes_smoke(self) -> None:
         nightly = scenarios.select(scenarios.load_all(SCENARIOS_DIR), tier="nightly")
@@ -77,6 +85,34 @@ class TestShippedScenarios:
         assert any("3 supported files found" in step for step in sc.steps)
         assert any('"3 items"' in exp for exp in sc.expectations)
         assert any("/tmp/kirocrew-gui-user-test/team-notes" in step for step in sc.steps)
+
+    def test_rich_seed_artifacts_are_the_ones_the_scenario_reads(self) -> None:
+        # The Artifacts scenario names the three artifacts the `rich` seed ships and
+        # narrows the table to the one markdown artifact by slug and kind. An
+        # artifact renamed, re-kinded or dropped from the fixture without the
+        # scenario moving fails here rather than as a paid nightly run.
+        from kiro_crew.artifacts import ArtifactStore
+        from kiro_crew.testing.fixtures import seeded_home
+
+        with seeded_home("rich"):
+            store = ArtifactStore()
+            by_slug = {a.slug: a for a in store.list()}
+        assert {slug: a.kind for slug, a in by_slug.items()} == {
+            "pagination-design": "markdown",
+            "queue-badge": "svg",
+            "release-checklist": "widget",
+        }
+        sc = scenarios.load_scenario(SCENARIOS_DIR / "artifacts-library-table-and-kind-filter.yaml")
+        first_step = sc.steps[0]
+        for slug in by_slug:
+            assert by_slug[slug].name in first_step, slug
+        markdown = [a for a in by_slug.values() if a.kind == "markdown"]
+        assert len(markdown) == 1
+        assert any(
+            markdown[0].name in exp and f'"{markdown[0].slug}"' in exp and '"markdown"' in exp
+            for exp in sc.expectations
+        )
+        assert any(f'"v{markdown[0].version}"' in exp for exp in sc.expectations)
 
     def test_explicit_name_selection(self) -> None:
         picked = scenarios.select(scenarios.load_all(SCENARIOS_DIR), names=["members-dm-hello"])
@@ -111,7 +147,14 @@ class TestShippedScenarios:
             "sidebar": ["sidebar-folders-and-older-sessions"],
             "search": ["search-everywhere-jump-to-setting"],
             "members": ["members-dm-hello", "members-private-memory-keeps-thread"],
+            "capabilities": [
+                "capabilities-agents-list-and-open-editor",
+                "capabilities-skills-filter-and-open-builtin",
+            ],
+            "connections": ["connections-services-search-and-mcp-list"],
+            "memory": ["memory-open-browser-from-overview"],
             "knowledge": ["knowledge-add-folder-source-and-scan"],
+            "artifacts": ["artifacts-library-table-and-kind-filter"],
             "apps": ["apps-discover-enable-research-lab"],
             "schedule": ["schedule-list-calendar-executions-views"],
             "auth": ["auth-sign-in-card-signed-out"],
@@ -123,7 +166,11 @@ class TestShippedScenarios:
             "sidebar",
             "search",
             "members",
+            "capabilities",
+            "connections",
+            "memory",
             "knowledge",
+            "artifacts",
             "apps",
             "schedule",
             "auth",
@@ -474,7 +521,7 @@ class TestReport:
         md = report.render_features(catalog, _summary(), run_url="https://x/run")
         assert md.startswith("# GUI user-test feature catalog\n")
         assert (
-            f"_9 of {len(scenarios.FEATURES)} features covered · 12 scenarios (9 smoke / 3 nightly)._"
+            f"_13 of {len(scenarios.FEATURES)} features covered · 17 scenarios (14 smoke / 3 nightly)._"
             in md
         )
         assert (
@@ -496,7 +543,7 @@ class TestReport:
         )
         # Uncovered features are the backlog.
         assert "## Not yet covered" in md
-        assert "- `artifacts` Artifacts" in md
+        assert "- `files` File viewer & project files" in md
         assert "- `chat` Chat sessions" not in md
 
     def test_features_catalog_without_a_run(self) -> None:
