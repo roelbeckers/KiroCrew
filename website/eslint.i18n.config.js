@@ -884,6 +884,22 @@ export default [
               // exempt, and the sentences AROUND it stayed in the catalog (that is
               // what `{{provider}}` is for).
               '^(GitHub|GitLab|Azure DevOps)$',
+                            // The AWS compute-service brands, the same class as the code-forge
+                            // brands above: "Fargate" is "Fargate" in every locale, and a
+                            // localized spelling would name a service that does not exist in the
+                            // console the reader goes on to open. They reach the UI as the
+                            // provisioner chip on a launch card in Deploy my crew, mapped from the
+                            // gateway's own `provider_id`, so the bare brand IS the whole literal.
+                            // Whole-value-anchored like the entries above, so a sentence merely
+                            // mentioning one is still reported -- only the bare name is exempt.
+                            //
+                            // DELIBERATELY NOT added to the do-not-translate glossary, unlike the
+                            // two entries above: those brands reach the UI as an interpolated
+                            // `{{provider}}` inside catalog sentences, so a catalog value carries
+                            // them and the glossary has something to guard. These two never enter a
+                            // catalog at all -- the chip renders the source constant directly -- so
+                            // a glossary term would guard nothing.
+                            '^(EC2|Fargate)$',
               // The PPTX Maker chat-token KEYWORDS (`[Style: name]`,
               // `[Template: name]`). Enumerated and whole-value-anchored, exactly like
               // the modifier-key caps below: the agent prompts parse this literal
